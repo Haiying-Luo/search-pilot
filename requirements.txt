@@ -1,0 +1,24 @@
+# Web framework
+fastapi
+uvicorn
+
+# LLM client
+openai
+
+# Data validation
+pydantic
+
+# YAML parsing
+pyyaml
+
+# HTTP requests
+requests
+
+# Wikipedia API
+wikipedia
+
+# Web scraping & content conversion
+markitdown
+
+# MCP client for Playwright browser tools
+mcp
