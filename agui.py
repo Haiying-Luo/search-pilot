@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List, Union
 
 from ag_ui.core import (
     Event,
@@ -60,9 +60,12 @@ def to_openai_messages(messages: List[Message]) -> List[Dict[str, Any]]:
     return openai_messages
 
 
+KEEPALIVE_SSE = ": keepalive\n\n"
+
+
 async def stream_agui_events(
     chunks: AsyncIterator[Chunk], run_agent_input: RunAgentInput
-) -> AsyncIterator[Event]:
+) -> AsyncIterator[Union[Event, str]]:
     """
     Stream AG-UI protocol events from a stream of Chunk objects.
     """
@@ -87,6 +90,10 @@ async def stream_agui_events(
                     message_id=msg_id,
                     delta=chunk.content,
                 )
+
+            elif chunk.type == "text" and not chunk.content:
+                # Empty text chunk = keepalive signal from agent_loop
+                yield KEEPALIVE_SSE
 
             elif chunk.type == "tool_call" and chunk.tool_call:
                 # End any pending text message before tool call

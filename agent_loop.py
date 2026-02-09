@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import logging
@@ -584,19 +585,31 @@ async def agent_loop(
     # --- Detect Chinese context ---
     chinese_context = _contains_cjk(user_question)
 
+    # Yield an initial chunk immediately so the SSE connection has data
+    # and the client won't idle-timeout during Phase 0 pre-analysis
+    yield Chunk(type="text", content="", step_index=0)
+
     # --- Phase 0: Question Pre-Analysis ---
     question_analysis = ""
     if user_question:
-        analysis_response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"{QUESTION_ANALYSIS_PROMPT}{user_question}",
-                }
-            ],
-        )
-        question_analysis = analysis_response.choices[0].message.content or ""
+        try:
+            analysis_response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": f"{QUESTION_ANALYSIS_PROMPT}{user_question}",
+                        }
+                    ],
+                ),
+                timeout=120,
+            )
+            question_analysis = analysis_response.choices[0].message.content or ""
+        except asyncio.TimeoutError:
+            logger.warning("Phase 0 question pre-analysis timed out (120s), skipping")
+        except Exception as e:
+            logger.warning(f"Phase 0 question pre-analysis failed: {e}, skipping")
 
     # --- Sub-agent tool functions come from SUB_AGENT_TOOLS (imported from tools/) ---
     sub_agent_tool_functions = list(SUB_AGENT_TOOLS)
@@ -765,7 +778,21 @@ async def agent_loop(
                 if func_name in tool_functions_map:
                     func = tool_functions_map[func_name]
                     if iscoroutinefunction(func):
-                        result = await func(**parsed_args)
+                        # Use asyncio.wait with periodic keepalive to prevent
+                        # SSE idle timeout during long-running async tools
+                        # (e.g. execute_subtask can run for minutes)
+                        task = asyncio.create_task(func(**parsed_args))
+                        while not task.done():
+                            done, _ = await asyncio.wait(
+                                {task}, timeout=30
+                            )
+                            if not done:
+                                yield Chunk(
+                                    type="text",
+                                    content="",
+                                    step_index=step_index,
+                                )
+                        result = task.result()
                     else:
                         result = func(**parsed_args)
                     tool_result_content = str(result)

@@ -1,5 +1,6 @@
 .env
 test
+.DS_Store
 CLAUDE.md
 __pycache__
 ./**/__pycache__/

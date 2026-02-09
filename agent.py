@@ -117,6 +117,8 @@ async def stream(req: QueryRequest) -> StreamingResponse:
                     "answer": chunk.content,
                 }
                 yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+            elif chunk.type == "text" and chunk.content == "":
+                yield ": keepalive\n\n"
 
     return StreamingResponse(
         stream_response(),
@@ -138,7 +140,10 @@ async def ag_ui(run_agent_input: RunAgentInput) -> StreamingResponse:
         async for event in stream_agui_events(
             chunks=agent_loop(messages, MAIN_AGENT_TOOLS), run_agent_input=run_agent_input
         ):
-            yield to_sse_data(event)
+            if isinstance(event, str):
+                yield event
+            else:
+                yield to_sse_data(event)
 
     return StreamingResponse(
         stream_response(),
