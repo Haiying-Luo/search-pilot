@@ -37,8 +37,6 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ---
 
-# Tool names that count as "search" for the SearchLoopGuard
-SEARCH_TOOL_NAMES = {"search_engine", "search_wikipedia", "search_wikipedia_revision", "list_wikipedia_revisions"}
 MAX_MAIN_AGENT_TURNS = 30
 MAX_SUB_AGENT_TURNS = 25
 
@@ -56,20 +54,40 @@ Also, consider additional flagging issues such as:
 - Numeric precision, rounding requirements, formatting, or units that might be unclear, erroneous, or inconsistent with standard practices or provided examples.
 - Contradictions or inconsistencies between explicit textual instructions and examples or contextual clues provided within the question itself.
 
-Do NOT attempt to guess or infer correct answers, as complete factual information is not yet available. Your responsibility is purely analytical, proactively flagging points that deserve special attention or clarification during subsequent information collection and task solving. Avoid overanalyzing or listing trivial details that would not materially affect the task outcome.
+Avoid overanalyzing or listing trivial details that would not materially affect the task outcome.
 
-## 推理链分解（关键步骤）
+## Knowledge-Based Entity Hypothesis Generation (CRITICAL)
 
-如果问题涉及多跳推理（需要多步信息检索才能得出答案），请务必：
+For each descriptive element, indirect reference, or oblique characterization in the question, you MUST leverage your internal knowledge to generate the most likely candidate entities. This step transforms vague multi-hop questions into concrete, targeted research tasks.
 
-1. **明确识别推理链**：将问题拆解为独立的子问题，每个子问题只涉及一个具体的信息检索任务
-2. **为每个子问题提供搜索计划**：
-   - 建议的搜索关键词（3-7个关键词，简短精准）
-   - 备选关键词（如果第一次搜索失败时使用）
-3. **标注子问题之间的依赖关系**：哪些子问题可以独立搜索，哪些需要先解决前置子问题
-4. **明确每个子问题需要确认的关键事实**：每一步需要确认什么信息，才能进入下一步
+For each descriptive element in the question:
+1. **Extract the descriptive clue** from the question text
+2. **Propose the most likely candidate entity** based on your broad knowledge
+3. **Explain the match** — briefly state why this candidate fits the description
+4. **Assign confidence** — high / medium / low
+5. **List alternatives** — if multiple candidates are plausible, list the top 2-3 with reasoning for each
 
-注意：每个子问题的搜索关键词必须独立，绝不能将多个子问题的关键词混合在一个查询中。
+**Chain derivation**: Once you identify a high-confidence candidate for one element, immediately use it as a known condition to derive candidates for subsequent elements. Build a complete candidate reasoning chain from the question's starting point to its final target.
+
+After generating all hypotheses, clearly categorize:
+- **High-confidence hypotheses** — can be treated as near-facts, only need quick verification
+- **Medium/low-confidence hypotheses** — require dedicated search effort to confirm or eliminate
+- **Unknown elements** — no strong candidate available, require open-ended search from scratch
+
+## Reasoning Chain Decomposition (CRITICAL)
+
+If the question involves multi-hop reasoning (requiring multiple information retrieval steps to reach an answer):
+
+1. **Identify the reasoning chain** — Decompose the question into independent sub-questions, each involving exactly ONE specific information retrieval task
+2. **Pre-judge each node using internal knowledge** — For each sub-question, provide the most likely candidate answer based on your existing knowledge, with confidence level
+3. **Provide a search plan for each sub-question**:
+   - Recommended search keywords (3-7 keywords, short and precise)
+   - Alternative keywords (to use if the first search fails)
+4. **Mark dependencies between sub-questions** — Which sub-questions can be searched independently (parallelizable), and which require prior sub-questions to be resolved first (sequential)
+5. **Specify the key fact each sub-question must confirm** — What information must be established at each step before proceeding to the next
+6. **Identify skippable nodes** — If a node's hypothesis has high confidence, recommend the main agent adopt it directly rather than spending time on verification
+
+Note: Search keywords for each sub-question must be independent — NEVER mix keywords from multiple sub-questions into a single query.
 
 ## 中文分析指导
 
@@ -82,19 +100,6 @@ Do NOT attempt to guess or infer correct answers, as complete factual informatio
 - **翻译风险**：标记直接翻译可能导致误解或信息丢失的关键术语
 - **时效性**：注意中文信息源的时效性和地域性特征
 - **分析输出**：使用中文进行分析和提示，确保语言一致性
-
-## 搜索工具选择指导
-
-可用的搜索和分析工具：
-
-- **search_engine 工具**：基于SERPAPI，使用 Google/Bing 等搜索引擎搜索网页，返回标题、URL 和摘要列表。适用于中英文关键词搜索。
-- **analyze_webpage 工具**：输入 URL 和问题，自动读取网页内容并提取相关信息。搜索后必须用此工具分析搜索结果中的网页。
-- **scrape_website 工具**：直接抓取网页内容并转换为 markdown 格式。
-- **search_wikipedia 工具**：搜索 Wikipedia 页面内容。
-- **search_wikipedia_revision 工具**：获取 Wikipedia 页面的历史版本内容。
-- **list_wikipedia_revisions 工具**：列出 Wikipedia 页面的可用历史版本。
-
-建议的工作流程：search_engine 搜索 → 选择最相关的 URL → analyze_webpage 逐个分析网页 → 综合信息得出答案。
 
 Here is the question:
 
@@ -278,8 +283,6 @@ def function_to_schema(func: Callable) -> dict:
 
 
 # --- CJK Detection ---
-
-
 def _contains_cjk(text: str) -> bool:
     """Check if text contains CJK (Chinese/Japanese/Korean) characters."""
     for char in text:
@@ -287,97 +290,7 @@ def _contains_cjk(text: str) -> bool:
             return True
     return False
 
-
-# --- SearchLoopGuard ---
-
-
-class SearchLoopGuard:
-    """Programmatic guard against search loop patterns in the sub-agent.
-
-    Tracks consecutive search calls and detects duplicate queries.
-    When threshold is hit, returns a warning message instead of executing the search.
-    Resets on any non-search tool call (analyze_webpage, browser, scrape, etc.).
-    """
-
-    def __init__(self, max_consecutive_searches=3, similarity_threshold=0.7):
-        self.consecutive_search_count = 0
-        self.recent_queries: list[str] = []
-        self.max_consecutive = max_consecutive_searches
-        self.similarity_threshold = similarity_threshold
-
-    def check_and_intercept(self, tool_name: str, tool_args: dict) -> tuple[bool, str]:
-        """Check if a tool call should be intercepted due to search loop.
-
-        Args:
-            tool_name: Name of the tool being called
-            tool_args: Arguments for the tool call
-
-        Returns:
-            (should_intercept, warning_message) tuple
-        """
-        is_search = tool_name in SEARCH_TOOL_NAMES
-        query = ""
-
-        if is_search:
-            # Extract query from known search tool arguments
-            query = tool_args.get("query", "") or tool_args.get("entity", "")
-
-        if not is_search:
-            # Non-search tool call resets the counter
-            self.consecutive_search_count = 0
-            return False, ""
-
-        self.consecutive_search_count += 1
-
-        # Check for duplicate queries
-        if query and self._is_duplicate_query(query):
-            return True, (
-                f"SEARCH BLOCKED: This search query is too similar to a previous query. "
-                f"Previous queries: {self.recent_queries[-3:]}. "
-                f"You MUST now use `analyze_webpage` or `scrape_website` to read the URLs from your "
-                f"previous search results, or try a completely different search angle with entirely new keywords."
-            )
-
-        # Check for too many consecutive searches
-        if self.consecutive_search_count > self.max_consecutive:
-            return True, (
-                f"SEARCH BLOCKED: You have made {self.consecutive_search_count} consecutive search calls "
-                f"without analyzing any pages. You MUST now use `analyze_webpage` or `scrape_website` to "
-                f"read and analyze URLs from your search results before making any more searches."
-            )
-
-        if query:
-            self.recent_queries.append(query)
-
-        return False, ""
-
-    def _is_duplicate_query(self, query: str) -> bool:
-        """Check if query has high word overlap with recent queries."""
-        # Use character-level comparison for CJK compatibility
-        if _contains_cjk(query):
-            query_chars = set(query)
-            for prev in self.recent_queries:
-                prev_chars = set(prev)
-                if not query_chars or not prev_chars:
-                    continue
-                overlap = len(query_chars & prev_chars) / max(len(query_chars), len(prev_chars))
-                if overlap >= self.similarity_threshold:
-                    return True
-        else:
-            words = set(query.lower().split())
-            for prev in self.recent_queries:
-                prev_words = set(prev.lower().split())
-                if not words or not prev_words:
-                    continue
-                overlap = len(words & prev_words) / max(len(words), len(prev_words))
-                if overlap >= self.similarity_threshold:
-                    return True
-        return False
-
-
 # --- Sub-Agent Runner ---
-
-
 async def run_sub_agent(
     client: AsyncOpenAI,
     model: str,
@@ -387,7 +300,7 @@ async def run_sub_agent(
 ) -> str:
     """Run the sub-agent worker to complete a research subtask.
 
-    Non-streaming, bounded turns, with SearchLoopGuard.
+    Non-streaming, bounded turns.
 
     Args:
         client: OpenAI-compatible async client
@@ -413,9 +326,6 @@ async def run_sub_agent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": subtask},
     ]
-
-    # Initialize SearchLoopGuard
-    guard = SearchLoopGuard()
 
     logger.info(f"[Sub-Agent] Starting subtask: {subtask[:200]}...")
 
@@ -471,19 +381,6 @@ async def run_sub_agent(
                 tool_result = f"Error: Failed to parse arguments: {e}"
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": tool_result}
-                )
-                continue
-
-            # Check SearchLoopGuard
-            should_intercept, warning = guard.check_and_intercept(
-                func_name, parsed_args
-            )
-            if should_intercept:
-                logger.warning(
-                    f"[Sub-Agent] SearchLoopGuard intercepted: {func_name}"
-                )
-                messages.append(
-                    {"role": "tool", "tool_call_id": tc.id, "content": warning}
                 )
                 continue
 
@@ -593,7 +490,7 @@ async def agent_loop(
     question_analysis = ""
     if user_question:
         try:
-            analysis_response = await asyncio.wait_for(
+            analysis_task = asyncio.create_task(
                 client.chat.completions.create(
                     model=model,
                     messages=[
@@ -602,40 +499,92 @@ async def agent_loop(
                             "content": f"{QUESTION_ANALYSIS_PROMPT}{user_question}",
                         }
                     ],
-                ),
-                timeout=120,
+                )
             )
-            question_analysis = analysis_response.choices[0].message.content or ""
-        except asyncio.TimeoutError:
-            logger.warning("Phase 0 question pre-analysis timed out (120s), skipping")
+            # Wait with periodic keepalive to prevent SSE timeout
+            pending = {analysis_task}
+            elapsed = 0
+            while pending:
+                _, pending = await asyncio.wait(pending, timeout=30)
+                elapsed += 30
+                if pending:
+                    if elapsed >= 50:
+                        analysis_task.cancel()
+                        logger.warning(
+                            "Phase 0 question pre-analysis timed out (50s), skipping"
+                        )
+                        break
+                    yield Chunk(type="text", content="", step_index=0)
+
+            if analysis_task.done() and not analysis_task.cancelled():
+                analysis_response = analysis_task.result()
+                question_analysis = analysis_response.choices[0].message.content or ""
         except Exception as e:
             logger.warning(f"Phase 0 question pre-analysis failed: {e}, skipping")
 
     # --- Sub-agent tool functions come from SUB_AGENT_TOOLS (imported from tools/) ---
     sub_agent_tool_functions = list(SUB_AGENT_TOOLS)
+    max_parallel = int(os.getenv("SUB_AGENT_NUM", "3"))
 
-    # --- Create execute_subtask closure ---
-    async def execute_subtask(subtask: str) -> str:
+    # --- Create execute_subtasks closure (parallel sub-agent dispatch) ---
+    async def execute_subtasks(subtasks_json: str) -> str:
         """
-        Delegate a research subtask to the worker agent. The worker agent has access to web search, webpage analysis, Wikipedia, website scraping, and browser tools. It will execute the subtask and return a structured research report.
+        Delegate one or more research subtasks to worker agents, executed in parallel. Each worker has independent access to web search, webpage analysis, Wikipedia, website scraping, and browser tools. Workers run concurrently and return structured research reports.
 
         Args:
-            subtask: A self-contained description of the research subtask. Must include ALL relevant context from previous subtask results, since the worker has no memory of previous interactions.
+            subtasks_json: A JSON array of subtask description strings. Each element is a self-contained research question that includes ALL relevant context (workers have no shared memory). For a single subtask, use a one-element array.
         """
-        return await run_sub_agent(
-            client=client,
-            model=model,
-            subtask=subtask,
-            sub_agent_tool_functions=sub_agent_tool_functions,
-            chinese_context=chinese_context,
+        try:
+            questions = json.loads(subtasks_json)
+            if isinstance(questions, str):
+                questions = [questions]
+        except json.JSONDecodeError:
+            # Fallback: treat as a single question
+            questions = [subtasks_json]
+
+        if not questions:
+            return "Error: No subtasks provided."
+
+        # Cap parallelism
+        questions = questions[:max_parallel]
+
+        logger.info(
+            f"[Main Agent] Dispatching {len(questions)} subtask(s) in parallel"
         )
 
-    # --- Main agent tools: [execute_subtask] + passed-in tool_functions ---
-    main_agent_tools = [execute_subtask] + list(tool_functions or [])
+        # Run all sub-agents concurrently
+        tasks = [
+            run_sub_agent(
+                client=client,
+                model=model,
+                subtask=q,
+                sub_agent_tool_functions=sub_agent_tool_functions,
+                chinese_context=chinese_context,
+            )
+            for q in questions
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Format combined results
+        output_parts = []
+        for i, (q, r) in enumerate(zip(questions, results)):
+            if isinstance(r, Exception):
+                output_parts.append(
+                    f"## Subtask {i + 1}\n**Question**: {q}\n**Result**: Error - {str(r)}"
+                )
+            else:
+                output_parts.append(
+                    f"## Subtask {i + 1}\n**Question**: {q}\n**Result**:\n{r}"
+                )
+
+        return "\n\n---\n\n".join(output_parts)
+
+    # --- Main agent tools: [execute_subtasks] + passed-in tool_functions ---
+    main_agent_tools = [execute_subtasks] + list(tool_functions or [])
 
     # --- Build main agent system prompt ---
     system_prompt = build_main_agent_system_prompt(
-        main_agent_tools, chinese_context
+        main_agent_tools, chinese_context, max_parallel=max_parallel
     )
     # Append the default system prompt (JSON answer format requirement)
     system_prompt = f"{system_prompt}\n\n{DEFAULT_SYSTEM_PROMPT}"
@@ -748,14 +697,14 @@ async def agent_loop(
             }
         )
 
-        # Execute tools and yield results
+        # Execute tools and yield results — parallel for async tools
+        # Phase 1: Parse all tool calls and yield tool_call notifications
+        parsed_tool_calls = []  # (call_id, func_name, parsed_args, tool_call, error_msg)
         for tool_data in assistant_tool_calls_data:
             call_id = tool_data["id"]
             func_name = tool_data["function"]["name"]
             func_args_str = tool_data["function"]["arguments"]
 
-            tool_result_content = ""
-            parsed_args = {}
             tool_call = ToolCall(
                 tool_call_id=call_id,
                 tool_name=func_name,
@@ -763,51 +712,69 @@ async def agent_loop(
             )
 
             try:
-                # Parse JSON arguments
                 parsed_args = json.loads(func_args_str)
                 tool_call.tool_arguments = parsed_args
-
-                # Notify caller that we are about to execute a tool
                 yield Chunk(
                     step_index=step_index,
                     type="tool_call",
                     tool_call=tool_call,
                 )
-
-                # Execute the function if it exists
-                if func_name in tool_functions_map:
-                    func = tool_functions_map[func_name]
-                    if iscoroutinefunction(func):
-                        # Use asyncio.wait with periodic keepalive to prevent
-                        # SSE idle timeout during long-running async tools
-                        # (e.g. execute_subtask can run for minutes)
-                        task = asyncio.create_task(func(**parsed_args))
-                        while not task.done():
-                            done, _ = await asyncio.wait(
-                                {task}, timeout=30
-                            )
-                            if not done:
-                                yield Chunk(
-                                    type="text",
-                                    content="",
-                                    step_index=step_index,
-                                )
-                        result = task.result()
-                    else:
-                        result = func(**parsed_args)
-                    tool_result_content = str(result)
-                else:
-                    tool_result_content = f"Error: Tool '{func_name}' not found."
-
+                parsed_tool_calls.append(
+                    (call_id, func_name, parsed_args, tool_call, None)
+                )
             except json.JSONDecodeError as e:
-                tool_result_content = f"Error: Failed to parse tool arguments JSON: {func_args_str}. Error: {e}"
+                error_msg = f"Error: Failed to parse tool arguments JSON: {func_args_str}. Error: {e}"
                 yield Chunk(
                     step_index=step_index,
                     type="tool_call",
                     tool_call=tool_call,
                 )
-            except Exception as e:
-                tool_result_content = f"Error: Execution failed - {str(e)}"
+                parsed_tool_calls.append(
+                    (call_id, func_name, {}, tool_call, error_msg)
+                )
+
+        # Phase 2: Launch all tools — async ones run concurrently
+        async_tasks = {}  # call_id -> asyncio.Task
+        sync_results = {}  # call_id -> result string
+
+        for call_id, func_name, parsed_args, tool_call, error_msg in parsed_tool_calls:
+            if error_msg:
+                sync_results[call_id] = error_msg
+                continue
+
+            if func_name not in tool_functions_map:
+                sync_results[call_id] = f"Error: Tool '{func_name}' not found."
+                continue
+
+            func = tool_functions_map[func_name]
+            if iscoroutinefunction(func):
+                async_tasks[call_id] = asyncio.create_task(func(**parsed_args))
+            else:
+                try:
+                    sync_results[call_id] = str(func(**parsed_args))
+                except Exception as e:
+                    sync_results[call_id] = f"Error: Execution failed - {str(e)}"
+
+        # Wait for all async tasks with periodic keepalive
+        if async_tasks:
+            pending = set(async_tasks.values())
+            while pending:
+                _, pending = await asyncio.wait(pending, timeout=30)
+                if pending:
+                    yield Chunk(
+                        type="text", content="", step_index=step_index
+                    )
+
+            # Collect async results
+            for call_id, task in async_tasks.items():
+                try:
+                    sync_results[call_id] = str(task.result())
+                except Exception as e:
+                    sync_results[call_id] = f"Error: Execution failed - {str(e)}"
+
+        # Phase 3: Yield all results and update message history
+        for call_id, func_name, parsed_args, tool_call, error_msg in parsed_tool_calls:
+            tool_result_content = sync_results[call_id]
 
             yield Chunk(
                 type="tool_call_result",

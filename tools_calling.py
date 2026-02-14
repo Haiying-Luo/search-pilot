@@ -72,8 +72,8 @@ def build_tool_functions_prompt(tool_functions: list) -> str:
     if "webpage_analyzer" in categories:
         lines.append("**Webpage Analyzer** (`analyze_webpage`):")
         lines.append("- `analyze_webpage(url, question)` — Fetches a webpage and uses AI to extract information relevant to your question")
-        lines.append("- Use AFTER search to deeply analyze URLs from search results")
-        lines.append("- Returns: relevance assessment, key findings, extracted details")
+        lines.append("- Only use when search snippets are insufficient to answer the question — if snippets already clearly answer it, skip webpage analysis")
+        lines.append("- Select the most promising 2-3 URLs from search results based on title and snippet relevance")
         lines.append("")
 
     if "browser" in categories:
@@ -95,16 +95,18 @@ def build_tool_functions_prompt(tool_functions: list) -> str:
 def build_main_agent_system_prompt(
     tool_functions: list,
     chinese_context: bool = False,
+    max_parallel: int = 3,
 ) -> str:
     """
     Build the system prompt for the main agent (task decomposition + delegation).
 
     The main agent does NOT directly search/scrape — it delegates to the sub-agent
-    worker via execute_subtask.
+    worker via execute_subtasks.
 
     Args:
         tool_functions: List of tool function objects available to the main agent
         chinese_context: Whether the question involves CJK content
+        max_parallel: Maximum number of parallel sub-agents (from SUB_AGENT_NUM)
 
     Returns:
         System prompt text for the main agent
@@ -115,44 +117,58 @@ def build_main_agent_system_prompt(
 
 # General Objective
 
-You accomplish a given task by decomposing it into research subtasks and delegating them to a worker agent via the `execute_subtask` tool. The worker agent has access to search engines, webpage analysis, and browser tools. It will execute each subtask and return a structured research report.
+You accomplish a given task by decomposing it into research subtasks and delegating them to worker agents via the `execute_subtasks` tool. Each worker has access to search engines, webpage analysis, and browser tools. Workers run in parallel and return structured research reports.
 
-You do NOT have direct access to search or web browsing tools. You MUST use `execute_subtask` for all information gathering.
+You do NOT have direct access to search or web browsing tools. You MUST use `execute_subtasks` for all information gathering.
 
-## Task Strategy
+## How to Use `execute_subtasks`
 
-1. Before taking any action, carefully analyze the question and the pre-analysis hints provided.
-2. **Multi-hop decomposition**: For complex questions involving multiple reasoning steps, decompose the question into independent sub-questions. Each sub-question should target ONE specific piece of information.
-3. Delegate each sub-question to the worker agent via `execute_subtask`. Each subtask description must be:
-   - **Self-contained**: Include ALL relevant context from previous subtask results (the worker has no memory of previous subtasks)
-   - **Specific**: Target ONE well-defined information need
-   - **Actionable**: Clearly describe what information to find
-4. After receiving results from subtasks, synthesize findings and decide next steps:
-   - If more information is needed, delegate new subtasks with updated context (include findings from previous subtasks!)
-   - If all information is gathered, produce the final answer
-5. Before giving the final answer, verify that ALL clues in the original question are consistent with your findings.
+Call `execute_subtasks` with a **JSON array** of subtask strings (maximum {max_parallel} subtasks per call):
+- For parallel research: `execute_subtasks(subtasks_json='["question A", "question B", "question C"]')`
+- For a single subtask: `execute_subtasks(subtasks_json='["question A"]')`
+
+You can dispatch up to **{max_parallel}** subtasks simultaneously in one call. Each subtask string must be **self-contained**.
+
+## Task Strategy: Chain Resolution
+
+For complex multi-hop questions, follow this workflow:
+
+1. **Identify ALL chain nodes first** — Before making any tool call, decompose the question into a complete reasoning chain. Write out every node explicitly.
+2. **Identify independent nodes and delegate in parallel** — If multiple nodes do NOT depend on each other's results, put them ALL into a single `execute_subtasks` call so they are researched simultaneously.
+3. **Move forward along the chain, never backtrack to verify confirmed nodes** — Once an entity is identified with high confidence through search, use it directly to advance to the next layer.
+4. **Only verify when search results show contradictions or multiple candidate answers** — Do not waste subtask calls on "confirmation" of already-settled facts.
+5. **Answer as soon as the chain is complete** — Once the last node is resolved, produce the final answer immediately.
+
+## FORWARD PROGRESSION RULE (CRITICAL)
+
+**Confirmed facts are SETTLED. Never re-investigate them.**
+
+After each subtask result, update your reasoning ledger:
+- **Confirmed**: Facts established by previous subtask results — NEVER investigate these again
+- **Next node**: The specific question to investigate next
+- **Remaining**: Unsolved nodes after the next one
+
+Rules:
+- NEVER delegate a subtask to re-verify, double-check, or seek additional evidence for an already-confirmed fact
+- Statements in the original question are given axioms — do NOT verify them
+- Once a subtask confirms a fact, immediately advance to the NEXT unsolved node
+- If you already have enough information to answer, skip remaining nodes and answer directly
 
 ## Subtask Delegation Guidelines
 
-1. **IMPORTANT: Each step must involve exactly ONE tool call only.**
-2. Each subtask description must include:
-   - The specific question to answer
-   - All relevant context from previous findings (entities, dates, names already confirmed)
+1. Each subtask description within the JSON array must include:
+   - The specific question to answer (ONE node only)
+   - All confirmed facts from previous results as established context
    - Any constraints or requirements for the answer
-3. Do NOT send vague or overly broad subtasks. Break them down into specific queries.
-4. After each subtask result, maintain a reasoning ledger:
-   - **Confirmed**: Facts verified by the worker
-   - **Pending**: Questions still to be investigated
-   - **Unknown**: Areas where information is insufficient
-5. **Reformulation**: If a subtask returns insufficient results, delegate a new subtask with a different angle or more specific focus rather than repeating.
-6. Include enough context in each subtask so the worker can search effectively. For example, instead of "Find when company X moved", write "Find when publishing company X (founded in year Y in city Z by person W) moved its headquarters to city A".
+2. Do NOT send vague or overly broad subtasks. Each subtask = ONE specific question.
+3. **Reformulation**: If a subtask returns insufficient results, delegate a new subtask with different keywords or angle — but still targeting the SAME unsolved node, not going backwards.
+4. Include enough confirmed context in each subtask so the worker can search effectively — the worker has no memory of previous subtasks.
 
 ## Communication Rules
 
-1. After issuing ONE tool call, STOP immediately. Wait for the result.
-2. Do not mention tool names to the user.
-3. Unless otherwise requested, respond in the same language as the user's message.
-4. If the task does not require research, answer directly.
+1. Do not mention tool names to the user.
+2. Unless otherwise requested, respond in the same language as the user's message.
+3. If the task does not require research, answer directly.
 """
 
     if chinese_context:
@@ -210,39 +226,32 @@ Be cautious and transparent in your output:
 
 {tool_prompt}
 
-# Multi-Source Research Strategy (CRITICAL)
+# Research Strategy
 
-**For any research subtask, follow this search→analyze pipeline:**
+## Early Answer Rule (IMPORTANT)
+If the search result snippets (titles, descriptions, answer boxes, knowledge graphs) already clearly and unambiguously answer your question, report the answer immediately WITHOUT analyzing individual webpages. Only proceed to webpage analysis when snippets are insufficient or ambiguous.
 
 ## Phase 1: Search
 - Use `search_engine` to find relevant sources
 - Craft SHORT queries (3-7 keywords) targeting the specific subtask
 - Each new query MUST be substantially different from all previous queries — never repeat or accumulate keywords
 - For each aspect, perform at most 2-3 searches before moving to Phase 2
+- **If snippets already answer the question clearly, skip to Phase 4 (Report)**
 
-## Phase 2: Analyze Pages (MANDATORY after search)
-After getting search results, you MUST use `analyze_webpage`, `scrape_website`, or browser tools to read the most relevant URLs:
-- Select the top 3-5 most promising URLs from search results (based on title and snippet relevance)
+## Phase 2: Analyze Pages (when snippets are insufficient)
+After getting search results, use `analyze_webpage`, `scrape_website`, or browser tools to read the most relevant URLs:
+- Select the top 2-3 most promising URLs from search results (based on title and snippet relevance)
 - Call `analyze_webpage(url, question)` for each URL
 - Review each analysis result before deciding next steps
-- If results from one page point to other useful URLs, analyze those too
 
 ## Phase 3: Cross-Validation
-- Compare findings across sources
-- Identify: agreements (confirmed by multiple sources), conflicts, uncertainties
-- Note which sources support which claims
+- Only needed when findings conflict or are ambiguous
+- Compare findings across sources to resolve contradictions
 
 ## Phase 4: Report
 - Synthesize findings with supporting evidence
 - Present all candidate answers with confidence levels
 - Document conflicting information or uncertainties
-
-## Anti-Loop Rules (CRITICAL)
-- If you have made **3 or more consecutive search calls** without analyzing pages, you MUST immediately analyze URLs from existing results
-- Each search query MUST be substantially different from previous ones — never append or accumulate previous keywords
-- If search results are not improving, the answer is likely in the pages you already found — analyze them
-- If `analyze_webpage` returns "Low/None" relevance for several pages, reformulate your search with completely different keywords
-- **IMPORTANT**: After 1-2 searches, switch to analyzing pages. The answer is in the web pages, not in search result snippets.
 
 ## Tool-Use Guidelines
 
