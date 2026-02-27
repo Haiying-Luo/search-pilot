@@ -3,10 +3,12 @@ Wikipedia search tools.
 
 Provides functions to search current Wikipedia pages, retrieve historical
 revisions, and list available revisions.
+
+Falls back to Jina Reader when Wikipedia API is inaccessible (e.g. from China).
 """
 
+import os
 import re
-import time
 import logging
 from datetime import datetime
 import requests
@@ -18,32 +20,46 @@ logger = logging.getLogger(__name__)
 # Set a proper User-Agent to avoid being blocked by Wikipedia API
 wikipedia.set_user_agent("TianchiAgent/1.0 (Research Bot; Python/wikipedia)")
 
-# Retry configuration
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = 2  # seconds, doubles each retry
+# Configure Wikipedia API URL — support mirrors for regions where Wikipedia is blocked.
+# Set WIKIPEDIA_API_URL in .env to a mirror base URL (without /w/api.php).
+# Default: https://en.wikipedia.org
+_wiki_base = os.getenv("WIKIPEDIA_API_URL", "https://en.wikipedia.org").rstrip("/")
+wiki_internal.API_URL = f"{_wiki_base}/w/api.php"
+logger.info(f"Wikipedia API URL: {wiki_internal.API_URL}")
+
+# Jina fallback configuration
+_JINA_API_KEY = os.getenv("JINA_API_KEY", "")
+_JINA_READER_URL = os.getenv("JINA_READER_URL", "https://r.jina.ai")
 
 
-def _retry_on_network_error(func, *args, **kwargs):
-    """Retry a function call on network errors with exponential backoff."""
-    last_error: Exception = RuntimeError("No retries attempted")
-    for attempt in range(_MAX_RETRIES):
-        try:
-            return func(*args, **kwargs)
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-                ConnectionResetError,
-                ConnectionAbortedError) as e:
-            last_error = e
-            if attempt < _MAX_RETRIES - 1:
-                wait_time = _RETRY_BACKOFF * (2 ** attempt)
-                logger.warning(
-                    f"Wikipedia network error (attempt {attempt + 1}/{_MAX_RETRIES}): {e}. "
-                    f"Retrying in {wait_time}s..."
-                )
-                time.sleep(wait_time)
-            else:
-                logger.error(f"Wikipedia network error after {_MAX_RETRIES} attempts: {e}")
-    raise last_error
+def _jina_fallback(entity: str) -> str:
+    """Fallback: fetch Wikipedia page content via Jina Reader when API is blocked."""
+    if not _JINA_API_KEY:
+        logger.warning("Jina fallback skipped: JINA_API_KEY not set")
+        return ""
+    wiki_url = f"https://en.wikipedia.org/wiki/{entity.replace(' ', '_')}"
+    jina_url = f"{_JINA_READER_URL}/{wiki_url}"
+    headers = {
+        "Authorization": f"Bearer {_JINA_API_KEY}",
+        "Accept": "text/plain",
+    }
+    try:
+        logger.info(f"Wikipedia API failed, trying Jina fallback for '{entity}'")
+        resp = requests.get(jina_url, headers=headers, timeout=30)
+        if resp.status_code == 200 and len(resp.text.strip()) > 50:
+            content = resp.text.strip()
+            return (
+                f"Page Title: {entity}\n\n"
+                f"Content (via Jina fallback):\n{content[:50000]}\n\n"
+                f"URL: {wiki_url}"
+            )
+        logger.warning(
+            f"Jina fallback returned status {resp.status_code}, "
+            f"body length {len(resp.text)}: {resp.text[:200]}"
+        )
+    except Exception as e:
+        logger.warning(f"Jina fallback also failed for '{entity}': {e}")
+    return ""
 
 
 def search_wikipedia(entity: str, first_sentences: int = 0) -> str:
@@ -58,14 +74,13 @@ def search_wikipedia(entity: str, first_sentences: int = 0) -> str:
         Formatted page content with title, text, and URL. Returns error message if not found.
     """
     try:
-        page = _retry_on_network_error(wikipedia.page, title=entity, auto_suggest=False)
+        page = wikipedia.page(title=entity, auto_suggest=False)
 
         result_parts = [f"Page Title: {page.title}"]
 
         if first_sentences > 0:
             try:
-                summary = _retry_on_network_error(
-                    wikipedia.summary,
+                summary = wikipedia.summary(
                     entity, sentences=first_sentences, auto_suggest=False
                 )
                 result_parts.append(
@@ -98,7 +113,7 @@ def search_wikipedia(entity: str, first_sentences: int = 0) -> str:
             f"Please be more specific in your search query."
         )
         try:
-            search_results = _retry_on_network_error(wikipedia.search, entity, results=5)
+            search_results = wikipedia.search(entity, results=5)
             if search_results:
                 output += f"Try to search {entity} in Wikipedia: {search_results}"
             return output
@@ -108,7 +123,7 @@ def search_wikipedia(entity: str, first_sentences: int = 0) -> str:
 
     except wikipedia.exceptions.PageError:
         try:
-            search_results = _retry_on_network_error(wikipedia.search, entity, results=5)
+            search_results = wikipedia.search(entity, results=5)
             if search_results:
                 suggestion_list = "\n".join(
                     [f"- {result}" for result in search_results[:5]]
@@ -132,13 +147,21 @@ def search_wikipedia(entity: str, first_sentences: int = 0) -> str:
     except wikipedia.exceptions.RedirectError:
         return f"Redirect Error: Failed to follow redirect for '{entity}'"
 
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, ConnectionError) as e:
+        # Network error — try Jina fallback
+        fallback = _jina_fallback(entity)
+        if fallback:
+            return fallback
         return f"Network Error: Failed to connect to Wikipedia: {str(e)}"
 
     except wikipedia.exceptions.WikipediaException as e:
         return f"Wikipedia Error: {str(e)}"
 
     except Exception as e:
+        # Catch-all — also try Jina fallback for unexpected connection issues
+        fallback = _jina_fallback(entity)
+        if fallback:
+            return fallback
         return f"Unexpected Error: {str(e)}"
 
 
@@ -164,7 +187,7 @@ def search_wikipedia_revision(
     try:
         # Step 1: Resolve page title
         try:
-            page = _retry_on_network_error(wikipedia.page, title=entity, auto_suggest=False)
+            page = wikipedia.page(title=entity, auto_suggest=False)
             page_title = page.title
         except wikipedia.exceptions.DisambiguationError as e:
             options_list = "\n".join([f"- {option}" for option in e.options[:10]])
@@ -197,7 +220,7 @@ def search_wikipedia_revision(
                 "rvstart": rvstart,
                 "rvdir": "older",
             }
-            rev_data = _retry_on_network_error(wiki_internal._wiki_request, rev_params)
+            rev_data = wiki_internal._wiki_request(rev_params)
 
             rev_pages = rev_data.get("query", {}).get("pages", {})
             rev_page = list(rev_pages.values())[0]
@@ -221,7 +244,7 @@ def search_wikipedia_revision(
             "rvprop": "content|timestamp|comment|user",
             "rvslots": "main",
         }
-        content_data = _retry_on_network_error(wiki_internal._wiki_request, content_params)
+        content_data = wiki_internal._wiki_request(content_params)
 
         content_pages = content_data.get("query", {}).get("pages", {})
         content_page = list(content_pages.values())[0]
@@ -289,7 +312,7 @@ def list_wikipedia_revisions(
 
     try:
         try:
-            page = _retry_on_network_error(wikipedia.page, title=entity, auto_suggest=False)
+            page = wikipedia.page(title=entity, auto_suggest=False)
             page_title = page.title
         except wikipedia.exceptions.DisambiguationError as e:
             options_list = "\n".join([f"- {option}" for option in e.options[:10]])
@@ -325,7 +348,7 @@ def list_wikipedia_revisions(
 
         rev_params["rvdir"] = "older"
 
-        rev_data = _retry_on_network_error(wiki_internal._wiki_request, rev_params)
+        rev_data = wiki_internal._wiki_request(rev_params)
 
         rev_pages = rev_data.get("query", {}).get("pages", {})
         rev_page = list(rev_pages.values())[0]
