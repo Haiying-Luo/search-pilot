@@ -19,7 +19,7 @@ from typing import (
     get_type_hints,
 )
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 from openai.types.chat import ChatCompletionChunk
 from tools_calling import (
     build_main_agent_system_prompt,
@@ -358,6 +358,30 @@ async def run_sub_agent(
                 ),
                 label=f"Waiting for LLM response (turn {turn + 1})...",
             )
+        except BadRequestError as e:
+            if e.status_code == 400 and "data_inspection_failed" in (
+                getattr(e, "code", "") or ""
+            ):
+                logger.warning(
+                    f"[Sub-Agent] Content filter triggered at turn {turn}, "
+                    "sanitizing tool results and retrying"
+                )
+                await _emit_progress(
+                    f"⚠️ Worker {worker_index}: Content filter triggered — "
+                    f"sanitizing and retrying\n\n"
+                )
+                # Replace recent tool-result messages with a safe placeholder
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "tool":
+                        messages[i]["content"] = (
+                            "[Content removed: blocked by platform content filter. "
+                            "Try a different search query or information source.]"
+                        )
+                    elif messages[i].get("role") == "assistant":
+                        break
+                continue
+            logger.error(f"[Sub-Agent] LLM call failed at turn {turn}: {e}")
+            break
         except Exception as e:
             logger.error(f"[Sub-Agent] LLM call failed at turn {turn}: {e}")
             break
