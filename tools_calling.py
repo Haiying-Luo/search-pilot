@@ -283,6 +283,14 @@ If the search result snippets (titles, descriptions, answer boxes, knowledge gra
 4. **Strict budget**: Use at most **6 total tool calls** per subtask. Plan your tool usage carefully.
 5. **For historical or time-specific content**: Use `search_wikipedia_revision` or `list_wikipedia_revisions` for Wikipedia history.
 6. After issuing ONE tool call, STOP immediately. Wait for the result.
+
+**Important Note**: - Gather comprehensive information from reliable sources to fully understand all aspects of the issue.
+- Present all possible candidate answers you identified during the information gathering process, regardless of uncertainty, ambiguity, or incomplete verification. Avoid jumping to conclusions or omitting any discovered possibilities.
+- Clearly record the detailed facts, evidence, and reasoning steps supporting each candidate answer, and carefully preserve the intermediate analysis results.
+- During the information collection process, clearly mark and retain all uncertainties, conflicting interpretations, or different understandings that are discovered. Do not arbitrarily discard or resolve these issues on your own.
+- In cases where there is inconsistency, ambiguity, errors, or potential mismatches with general guidelines or provided examples in the explicit instructions of a problem (such as numerical accuracy, formatting, specific requirements), all reasonable explanations and corresponding candidate answers should be clearly documented and presented.
+- **CRITICAL** The search results returned may not be accurate, and information such as year, place name, and personal name, especially in terms of year and time, please allow for some fluctuations in the year and time obtained from the search.
+- **The previously searched conditions may not be correct, such as year, time, place name, etc. Please be sure to filter the search results that best match the conditions.
 """
 
     if chinese_context:
@@ -300,7 +308,7 @@ If the search result snippets (titles, descriptions, answer boxes, knowledge gra
 
 在报告研究结果时：
 - 请务必提供实体的多种标识形式（如个人姓名、年号、庙号、谥号、全称、简称等），以便主代理选择正确的答案格式。
-- **人名必须使用完整全名**（姓+名），不要只写姓或只写名。
+- **先前搜索出来的条件可能并不正确**，例如年份时间、地名等信息可能不一定正确，请务必筛选最符合条件的搜索结果。
 - **组织/机构名称必须使用完整官方全称**，不要使用缩写或简称。
 - **地名、作品名等也必须使用完整正式名称**。
 - **若原始问题指定了输出格式，请在报告中明确标注该格式要求，确保主代理能够精确遵循。

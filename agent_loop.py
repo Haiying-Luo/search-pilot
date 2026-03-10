@@ -41,24 +41,17 @@ MAX_MAIN_AGENT_TURNS = 30
 MAX_SUB_AGENT_TURNS = 10
 
 
-DEFAULT_SYSTEM_PROMPT = """You are an AI assistant designed to help with a variety of tasks. You have access to several tools that can assist you in providing accurate and relevant information.
-
-Your task is to actively gather detailed information from the internet and generate answers to users' questions. Your goal is not to rush to a definitive answer or conclusion, but to collect complete information and present all reasonable candidate answers you find, accompanied by clearly documented supporting evidence, reasoning steps, uncertainty factors, and explicit intermediate findings.
-
-The user has no intention of deliberately setting traps or creating confusion. Please use the most common, reasonable, and direct explanation to handle the task, and do not overthink or focus on rare or far-fetched explanations.
-
-Important Note: - Gather comprehensive information from reliable sources to fully understand all aspects of the issue.
+DEFAULT_SYSTEM_PROMPT = """
+**Important Note**: - Gather comprehensive information from reliable sources to fully understand all aspects of the issue.
 - Present all possible candidate answers you identified during the information gathering process, regardless of uncertainty, ambiguity, or incomplete verification. Avoid jumping to conclusions or omitting any discovered possibilities.
 - Clearly record the detailed facts, evidence, and reasoning steps supporting each candidate answer, and carefully preserve the intermediate analysis results.
 - During the information collection process, clearly mark and retain all uncertainties, conflicting interpretations, or different understandings that are discovered. Do not arbitrarily discard or resolve these issues on your own.
 - In cases where there is inconsistency, ambiguity, errors, or potential mismatches with general guidelines or provided examples in the explicit instructions of a problem (such as numerical accuracy, formatting, specific requirements), all reasonable explanations and corresponding candidate answers should be clearly documented and presented.
-
-Recognize that the original task description itself may inadvertently contain errors, imprecision, inaccuracy, or conflicts due to user carelessness, misunderstanding, or limited professional knowledge. Do not attempt to internally question or "correct" these instructions; instead, present the survey results transparently based on every reasonable interpretation.
-
-Your goal is to achieve the highest degree of completeness, transparency, and detailed documentation, enabling users to make independent judgments and choose their preferred answers. Even in the presence of uncertainty, explicitly recording the existence of possible answers can significantly enhance the user experience, ensuring that no reasonable solutions are irreversibly omitted due to early misunderstandings or premature filtering.
+- **CRITICAL** The survey results returned by the sub agent may not be accurate, and information such as year, place name, and personal name needs to be strictly compared with the content in the user's query.
+- **CRITICAL** The questions asked by users have specific answers. If there is currently no accurate answer, the search keywords need to be changed according to the context to continue the research. It is prohibited to answer this question without an answer or output unknown.
 
 When generating responses, it is crucial to pay attention to the following points:
-1. Keep your response as concise as possible. The response content should be returned as a JSON dictionary, with the answer to the question corresponding to the key "answer". For example, if the user inputs {"question": "Where is the capital of France?"}, you only need to respond with {"answer": "Paris"}
+1. **IMPORTANT** Keep your response as concise as possible. The response content should be returned as a JSON dictionary, with the answer to the question corresponding to the key "answer". For example, if the user inputs {"question": "Where is the capital of France?"}, you only need to respond with {"answer": "Paris"}
 2. To minimize misjudgments caused by format differences, the following preprocessing is applied to the output responses:
 - Convert English letters to lowercase;
 - Remove leading and trailing spaces;
@@ -234,6 +227,7 @@ async def run_sub_agent(
     chinese_context: bool = False,
     progress_queue: Optional[asyncio.Queue] = None,
     worker_index: int = 0,
+    user_question: str = "",
 ) -> str:
     """Run the sub-agent worker to complete a research subtask.
 
@@ -318,6 +312,8 @@ async def run_sub_agent(
     system_prompt = build_sub_agent_system_prompt(
         sub_agent_tool_functions, chinese_context
     )
+    if user_question:
+        system_prompt += f"\n\n## User's Original Question\n{user_question}"
 
     # Build tool schema and map
     tool_schema = [function_to_schema(f) for f in sub_agent_tool_functions]
@@ -590,6 +586,7 @@ async def agent_loop(
                 chinese_context=chinese_context,
                 progress_queue=progress_queue,
                 worker_index=i + 1,
+                user_question=user_question,
             )
             for i, q in enumerate(questions)
         ]
