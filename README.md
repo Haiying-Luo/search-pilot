@@ -196,7 +196,7 @@ JINA_API_KEY=jina_xxxxx
 
 通过 Serper API 进行 Google 搜索，返回标题、URL、摘要、答案框和知识图谱等结构化结果。
 
-- **依赖**: `SERPER_API_KEYS`（推荐）或 `SERPER_API_KEY`
+- **依赖**: `SERPER_API_KEYS`（推荐，防止单个KEY使用额度不满足问答需求）或 `SERPER_API_KEY`
 - **参数**: `query` (查询词), `num_results` (结果数, 默认 20), `language` (语言, 默认 "en")
 
 #### 📚 Wikipedia (`wiki_search`)
@@ -264,7 +264,7 @@ Agent 的核心推理策略遵循 **链式解题 (Chain Resolution)** 模式：
 | 子智能体异常   | `asyncio.gather` + `return_exceptions` | 单个子智能体失败不影响其他并行子智能体的正常返回                          |
 | 主智能体兜底   | 最大轮次耗尽 → 强制总结生成答案           | 即使未完全解答也会基于已有信息给出最佳猜测                                |
 
-## 比赛成绩（初赛27/188，复赛15/49）
+## 比赛成绩（初赛27/188，复赛15/188）
 ### 初赛
 
 ![初赛成绩截图](docs/preliminary-result.png)
