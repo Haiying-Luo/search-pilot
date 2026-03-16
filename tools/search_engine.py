@@ -1,37 +1,98 @@
 """
 Google Search tool using Serper API.
 
-Requires SERPER_API_KEY environment variable (used as fallback).
-Free-tier API keys are tried first; exhausted keys (HTTP 403) are
-automatically skipped for the rest of the process lifetime.
+Reads keys from environment variables:
+- SERPER_API_KEYS: optional key pool (comma/newline/space separated)
+- SERPER_API_KEY: optional single fallback key
+
+Exhausted keys (HTTP 400/403 JSON) are automatically skipped for the
+rest of the process lifetime.
 """
 
 import json
 import logging
 import os
+import re
 
 import requests
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Free-tier API key pool — add keys here as needed.
-# Keys that return 403 are marked dead and never retried.
+# Keys that return 400/403 (quota exhausted/invalid) are marked dead and never
+# retried for the rest of the process lifetime.
 # ---------------------------------------------------------------------------
-_FREE_KEY_POOL: list[str] = [
-    "your_free_api_key_1",
-    "your_free_api_key_2",
-]
-
 _dead_keys: set[str] = set()
 
 
+def _looks_like_placeholder(value: str) -> bool:
+    lowered = value.strip().lower()
+    placeholder_markers = (
+        "your",
+        "replace_me",
+        "example",
+        "placeholder",
+        "xxxx",
+        "changeme",
+    )
+    return any(marker in lowered for marker in placeholder_markers)
+
+
+def _is_valid_serper_key(value: str) -> bool:
+    """Best-effort format check for Serper API keys."""
+    key = value.strip()
+    if not key:
+        return False
+    if _looks_like_placeholder(key):
+        return False
+    # Serper keys are typically long opaque tokens; keep this rule permissive.
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{20,}", key))
+
+
+def _parse_serper_pool(raw_value: str | None) -> list[str]:
+    """Parse SERPER_API_KEYS into a de-duplicated key list preserving order."""
+    if not raw_value:
+        return []
+
+    parts = re.split(r"[\s,;]+", raw_value.strip())
+    seen: set[str] = set()
+    keys: list[str] = []
+    for part in parts:
+        key = part.strip()
+        if not key or key in seen:
+            continue
+        if not _is_valid_serper_key(key):
+            masked = (key[:6] + "..." + key[-4:]) if len(key) > 12 else key
+            logger.warning(
+                "[Serper] Ignoring invalid key in SERPER_API_KEYS: %s "
+                "(check .env formatting or placeholder values)",
+                masked,
+            )
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _configured_key_pool() -> list[str]:
+    """Return key pool from env var SERPER_API_KEYS."""
+    return _parse_serper_pool(os.getenv("SERPER_API_KEYS"))
+
+
 def _get_ordered_keys() -> list[str]:
-    """Return keys to try in order: alive free keys first, then env key."""
-    keys = [k for k in _FREE_KEY_POOL if k not in _dead_keys]
+    """Return keys to try in order: pool keys first, then single fallback key."""
+    keys = [k for k in _configured_key_pool() if k not in _dead_keys]
     env_key = os.getenv("SERPER_API_KEY")
-    if env_key and env_key not in _dead_keys:
-        keys.append(env_key)
+    if env_key:
+        if not _is_valid_serper_key(env_key):
+            masked = (env_key[:6] + "..." + env_key[-4:]) if len(env_key) > 12 else env_key
+            logger.warning(
+                "[Serper] Ignoring invalid SERPER_API_KEY: %s "
+                "(check .env formatting or placeholder value)",
+                masked,
+            )
+        elif env_key not in _dead_keys and env_key not in keys:
+            keys.append(env_key)
     return keys
 
 
@@ -67,7 +128,7 @@ def search_engine(
     """
     keys = _get_ordered_keys()
     if not keys:
-        return "Error: No available Serper API keys (all exhausted and SERPER_API_KEY not set)"
+        return "Error: No available Serper API keys (all exhausted and neither SERPER_API_KEYS nor SERPER_API_KEY is set)"
 
     payload = {"q": query, "num": num_results, "hl": language}
     last_error = ""
@@ -158,5 +219,5 @@ def _format_results(query: str, data: dict, num_results: int) -> str:
 
 
 SEARCH_ENGINE_TOOLS = []
-if os.getenv("SERPER_API_KEY") or _FREE_KEY_POOL:
+if _configured_key_pool() or os.getenv("SERPER_API_KEY"):
     SEARCH_ENGINE_TOOLS = [search_engine]

@@ -153,6 +153,7 @@ python -m uvicorn agent:app --reload --host 0.0.0.0 --port 8000
 |---------|------|------|
 | `DASHSCOPE_API_KEY` | ✅ | 阿里云 DashScope API Key，用于调用 Qwen 大模型 |
 | `QWEN_MODEL` | | 模型名称，默认 `qwen-max` |
+| `SERPER_API_KEYS` | | Google 搜索服务 Key 池（可选，支持逗号/换行分隔多个 key） |
 | `SERPER_API_KEY` | | Google 搜索服务 (Serper)，启用搜索引擎工具 |
 | `JINA_API_KEY` | | Jina AI，启用网页爬取、网页分析、Wikipedia 降级 |
 | `E2B_API_KEY` | | E2B 沙箱，启用安全的 Python 代码执行 |
@@ -166,6 +167,7 @@ python -m uvicorn agent:app --reload --host 0.0.0.0 --port 8000
 
 ```env
 DASHSCOPE_API_KEY=sk-xxxxx
+SERPER_API_KEYS=key_a,key_b,key_c
 SERPER_API_KEY=xxxxx
 JINA_API_KEY=jina_xxxxx
 ```
@@ -194,7 +196,7 @@ JINA_API_KEY=jina_xxxxx
 
 通过 Serper API 进行 Google 搜索，返回标题、URL、摘要、答案框和知识图谱等结构化结果。
 
-- **依赖**: `SERPER_API_KEY`
+- **依赖**: `SERPER_API_KEYS`（推荐）或 `SERPER_API_KEY`
 - **参数**: `query` (查询词), `num_results` (结果数, 默认 20), `language` (语言, 默认 "en")
 
 #### 📚 Wikipedia (`wiki_search`)
